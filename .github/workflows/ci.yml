@@ -1,0 +1,23 @@
+# Prepared CI workflow for WinRecovery.
+# To enable: copy this file to .github/workflows/ci.yml in the repo
+# (GitHub requires workflow files to be added through the web UI or a
+# token with the workflows permission).
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  gate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: Show artifacts
+        run: dir target\release\winrecovery.dll, target\release\winrecovery.dll.lib

@@ -169,6 +169,10 @@ mod windows {
             .into_owned()
     }
 
+    // Import libraries are named explicitly on each block: without them the
+    // symbols below are unresolved at link time (LNK2019) — `cargo check`
+    // and clippy cannot catch that, only a real link (CI) can.
+    #[link(name = "advapi32")]
     extern "system" {
         fn RegOpenKeyExW(hkey: Hkey, sub: *const u16, opts: u32, sam: u32, out: *mut Hkey) -> i32;
         fn RegCloseKey(hkey: Hkey) -> i32;
@@ -200,6 +204,10 @@ mod windows {
             data: *mut u8,
             data_len: *mut u32,
         ) -> i32;
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
         fn LoadLibraryW(name: *const u16) -> Handle;
         fn FreeLibrary(lib: Handle) -> i32;
         fn GetProcAddress(lib: Handle, name: *const u8) -> Option<unsafe extern "system" fn()>;
@@ -214,6 +222,7 @@ mod windows {
         size: i64,
         num_items: i64,
     }
+    #[link(name = "shell32")]
     extern "system" {
         fn SHQueryRecycleBinW(root: *const u16, info: *mut ShQueryRbInfo) -> i32;
         fn SHEmptyRecycleBinW(hwnd: Handle, root: *const u16, flags: u32) -> i32;
@@ -223,6 +232,7 @@ mod windows {
     const SHERB_NOSOUND: u32 = 0x4;
 
     // advapi32 — Service Control Manager.
+    #[link(name = "advapi32")]
     extern "system" {
         fn OpenSCManagerW(machine: *const u16, db: *const u16, access: u32) -> Handle;
         fn CloseServiceHandle(h: Handle) -> i32;

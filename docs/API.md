@@ -68,8 +68,10 @@ States: `stopped`, `start_pending`, `stop_pending`, `running`,
 - Delete loads `srclient.dll` at runtime and calls `SRRemoveRestorePoint`;
   editions without it get a clean `WR_ERR_PLATFORM`, not a load failure.
 - Create/delete require elevation; the library never prompts for it.
-- All Windows behavior is compile-verified for `x86_64-pc-windows-msvc`
-  but **not yet run on a real Windows machine**. Treat v0.1.0 as a
+- Windows behavior is compile-, link-, and test-verified on
+  `windows-latest` CI (the suite passes natively and the release DLL
+  builds), but the enumeration/mutation calls have **not yet been run
+  against a live Windows machine's real data**. Treat v0.1.0 as a
   foundation build until the on-machine matrix in the README is checked off.
 - Non-Windows builds exist so the parsing/FFI logic can be tested anywhere;
   every platform call there returns `WR_ERR_NOT_SUPPORTED`.

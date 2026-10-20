@@ -111,9 +111,15 @@ CI on `windows-latest`.
 - Windows target compile (`x86_64-pc-windows-msvc`, all targets): **passes**.
 - C consumer smoke test against the built library: **passes** (version +
   error contract).
-- **Not yet verified:** running the Windows build on a real Windows machine
-  (restore-point create/list/delete, Recycle Bin, SCM enumeration). That
-  on-machine pass is the v0.1.0 release gate — see `docs/API.md`.
+- **CI green on `windows-latest`** (run for the link fix): fmt, clippy,
+  `cargo test --locked` — the full suite runs and passes natively on
+  Windows — and the release build producing `winrecovery.dll` +
+  `winrecovery.dll.lib` all pass.
+- **Not yet verified:** calling the enumeration/mutation functions against
+  a live Windows machine's real data (restore-point create/list/delete,
+  Recycle Bin contents, SCM enumeration on a populated system). The CI
+  tests exercise the FFI contract and parsers, not live system state.
+  That on-machine pass is the v0.1.0 release gate — see `docs/API.md`.
 
 ## The DLL Collection
 

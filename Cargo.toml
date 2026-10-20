@@ -1,0 +1,28 @@
+[package]
+name = "winrecovery"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+authors = ["Sean Shaffer"]
+description = "WinRecovery.dll — one clean C-ABI DLL for Windows recovery primitives: System Restore points, VSS shadow storage, Recycle Bin, installed programs, startup entries, services and drivers."
+license = "MIT"
+repository = "https://github.com/SeanShaffer88/WinRecovery"
+keywords = ["windows", "system-restore", "vss", "recycle-bin", "ffi"]
+categories = ["os::windows-apis", "api-bindings"]
+
+[lib]
+name = "winrecovery"
+crate-type = ["cdylib", "rlib", "staticlib"]
+
+# Zero dependencies by design: every Win32 binding is declared by hand in
+# src/platform/windows.rs (the same pattern SafeReturn's VSS helper uses).
+# A recovery library that other tools embed should add nothing to their
+# dependency tree and nothing to the DLL's import table beyond Windows itself.
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

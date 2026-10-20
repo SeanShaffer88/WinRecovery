@@ -334,7 +334,7 @@ mod windows {
                 return platform_err("System Restore (srclient.dll) is not available");
             }
             // Invariant: the export name is a valid NUL-terminated C string.
-            let proc = GetProcAddress(lib, b"SRRemoveRestorePoint\0".as_ptr());
+            let proc = GetProcAddress(lib, c"SRRemoveRestorePoint".as_ptr() as *const u8);
             let result = match proc {
                 Some(f) => {
                     let remove: unsafe extern "system" fn(u32) -> u32 = std::mem::transmute(f);
@@ -677,7 +677,7 @@ mod windows {
                 });
             }
         }
-        out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        out.sort_by_key(|a| a.name.to_lowercase());
         Ok(out)
     }
 
@@ -860,7 +860,7 @@ mod windows {
             .into_iter()
             .filter(|e| !drivers_only || e.is_driver)
             .collect();
-        entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        entries.sort_by_key(|a| a.name.to_lowercase());
         Ok(entries)
     }
 }

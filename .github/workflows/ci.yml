@@ -183,24 +183,59 @@ jobs:
               }
             }
 
-            # Print the compiler version so a failure is attributable to a
-            # specific toolchain.
-            $verOut = cmd /c "call "$vcvars" >nul 2>&1 && cl 2>&1"
-            Write-Host ($verOut -join "\n")
+            # Build through a generated batch file instead of passing a quoted
+            # command string from pwsh to cmd. PowerShell 7.3+ defaults to
+            # `Standard` native argument passing, which escapes inner quotes as
+            # \" -- a form cmd does not understand -- so
+            #   cmd /c "call "<path with spaces>" >nul 2>&1 && cl ..."
+            # arrives mangled, cl never runs, and the step fails with exit 1 and
+            # no output (exactly what run #7 reported). A batch file has no such
+            # indirection, and vcvars output is no longer suppressed, so a
+            # failure there is visible instead of hidden behind >nul.
+            $tmp = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }
+            $bat = Join-Path $tmp 'winrecovery-build-c.bat'
+            # Distinct exit codes, so the failing phase is identifiable even if
+            # output capture breaks again: 1 vcvars, 2 contract.c, 3 example.c.
+            $batch = @(
+              '@echo off',
+              "call `"$vcvars`"",
+              'if errorlevel 1 exit /b 1',
+              'where cl',
+              'cl /nologo /W4 /WX /I include examples/c/contract.c /Fe:target/release/contract.exe /link target/release/winrecovery.dll.lib',
+              'if errorlevel 1 exit /b 2',
+              'cl /nologo /W4 /I include examples/c/example.c /Fe:target/release/example.exe /link target/release/winrecovery.dll.lib',
+              'if errorlevel 1 exit /b 3',
+              'exit /b 0'
+            ) -join [Environment]::NewLine
+            Set-Content -Path $bat -Value $batch -Encoding ascii
+            Write-Host "--- generated $bat ---"
+            Write-Host $batch
 
-            # /W4 /WX on the contract test: it is the gated assertion, so a new
-            # warning there should be looked at, not ignored. The example is
-            # documentation, so it builds at /W4 without /WX and is not gated.
-            $out = cmd /c "call "$vcvars" >nul 2>&1 && cl /nologo /W4 /WX /I include examples/c/contract.c /Fe:target/release/contract.exe /link target/release/winrecovery.dll.lib 2>&1"
+            # /W4 /WX on contract.c: it is the gated assertion, so a new warning
+            # there should be looked at, not ignored. example.c is
+            # documentation, so it builds at /W4 without /WX.
+            #
+            # ErrorActionPreference is relaxed for the invocation only: with
+            # `Stop` and 2>&1, a native command's stderr lines can surface as
+            # terminating errors, which would abort the step before the output
+            # could be reported.
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            $out = & $bat 2>&1 | ForEach-Object { "$_" }
             $code = $LASTEXITCODE
-            Write-Host ($out -join "\n")
-            if ($code -ne 0) { Report-Failure "cl contract.c (exit $code)" ($out -join "\n") }
+            $ErrorActionPreference = $prevEap
 
-            $out = cmd /c "call "$vcvars" >nul 2>&1 && cl /nologo /W4 /I include examples/c/example.c /Fe:target/release/example.exe /link target/release/winrecovery.dll.lib 2>&1"
-            $code = $LASTEXITCODE
-            Write-Host ($out -join "\n")
-            if ($code -ne 0) { Report-Failure "cl example.c (exit $code)" ($out -join "\n") }
-
+            $joined = $out -join [Environment]::NewLine
+            Write-Host $joined
+            if ($code -ne 0) {
+              $phase = switch ($code) {
+                1 { 'vcvars64.bat failed' }
+                2 { 'cl contract.c failed (gated: /W4 /WX)' }
+                3 { 'cl example.c failed' }
+                default { "MSVC build failed (exit $code)" }
+              }
+              Report-Failure "$phase [exit $code]" $joined
+            }
             Write-Host 'MSVC build OK'
           } catch {
             # Catch anything the explicit checks missed, so no failure can exit

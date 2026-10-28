@@ -99,80 +99,101 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          # The Rust MSVC target already links on this runner, so a VC toolchain
-          # is definitely installed; vswhere is the supported way to find it.
-          # Locate it rather than hardcoding a version directory:
-          # `windows-latest` is a moving label (Server 2022 -> 2025, VS2026
-          # images rolling out), and a pinned path breaks the next time it
-          # moves — which is what an earlier revision of this step did.
-          $vswhere = @(
-            (Join-Path $env:ProgramFiles 'Microsoft Visual Studio\Installer\vswhere.exe'),
-            (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe')
-          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if (-not $vswhere) { throw 'vswhere.exe not found' }
-
-          $vsPath = & $vswhere -latest -all -prerelease -requires VC.Tools.x86.x64 -property installationPath | Select-Object -First 1
-          if (-not $vsPath) { throw 'no Visual Studio install with VC tools found' }
-          Write-Host "Visual Studio: $vsPath"
-
-          # vcvars64.bat is used instead of the DevShell PowerShell module: it is
-          # the documented MSVC entry point, exists in every VS layout (2022 and
-          # 2026), and running the compiler in the same cmd invocation as the
-          # environment setup avoids depending on how the module exports env
-          # vars into pwsh.
-          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
-          if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
-
-          foreach ($f in 'winrecovery.dll', 'winrecovery.dll.lib') {
-            if (-not (Test-Path "target/release/$f")) {
-              throw "missing Rust build output: target/release/$f"
-            }
-          }
-
-          # Posts this step's own captured output to the PR. Raw job logs are
-          # served from a host that is unreachable from some development
-          # environments, and the job summary is not exposed via the REST API,
-          # so the step reports itself instead of relying on either.
-          function Report-Failure([string]$phase, [string]$output, [int]$code) {
-            Write-Host "--- $phase failed (exit $code) ---"
-            Write-Host $output
+          # Defined first, before anything that can fail. An earlier revision
+          # declared this *after* the toolchain-discovery code, so a failure
+          # there threw into the job log and reported nothing — the log host is
+          # unreachable from some development environments and the job summary
+          # is not exposed via the REST API, which made the step undiagnosable.
+          # Everything below is wrapped so any failure posts its own reason.
+          function Report-Failure([string]$phase, [string]$detail) {
+            Write-Host "--- FAILED: $phase ---"
+            Write-Host $detail
             if ('${{ github.event_name }}' -eq 'pull_request') {
-              $body = @(
-                "### CI: $phase failed (exit $code)",
-                '',
-                '- Runner: ${{ runner.os }} / ${{ runner.arch }}',
-                "- Visual Studio: $vsPath",
-                '- Commit: ${{ github.sha }}',
-                '',
-                '```',
-                ($output -split "\r?\n" | Select-Object -Last 90),
-                '```'
-              ) -join "\n"
-              gh pr comment ${{ github.event.pull_request.number }} --body $body 2>&1 |
-                Write-Host
+              $lines = @($detail -split "\r?\n")
+              if ($lines.Count -gt 90) { $lines = $lines[-90..-1] }
+              $body = "### CI: $phase" + "\n\n" +
+                "- Commit: ${{ github.sha }}" + "\n" +
+                "- Runner: ${{ runner.os }}" + "\n\n" +
+                '```' + "\n" + ($lines -join "\n") + "\n" + '```'
+              try {
+                gh pr comment ${{ github.event.pull_request.number }} --body $body 2>&1 |
+                  Write-Host
+              } catch {
+                Write-Host "could not post the PR comment: $_"
+              }
             }
             exit 1
           }
 
-          # Print the compiler version: it identifies the toolchain a failure
-          # came from, which is the first thing needed to diagnose it.
-          $verOut = cmd /c "call `"$vcvars`" >nul 2>&1 && cl 2>&1"
-          Write-Host ($verOut -join "\n")
+          try {
+            # The Rust MSVC target already links on this runner, so a VC
+            # toolchain is installed; vswhere is the supported way to find it.
+            # Locate it rather than hardcoding a version directory:
+            # `windows-latest` is a moving label (Server 2022 -> 2025, VS2026
+            # images rolling out) and a pinned path breaks when it moves.
+            $vswhere = @(
+              (Join-Path $env:ProgramFiles 'Microsoft Visual Studio\Installer\vswhere.exe'),
+              (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe')
+            ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if (-not $vswhere) {
+              Report-Failure 'vswhere.exe not found' "looked under $env:ProgramFiles and ${env:ProgramFiles(x86)}"
+            }
+            Write-Host "vswhere: $vswhere"
 
-          # /W4 /WX on the contract test: it is the gated assertion, so a new
-          # warning there should be looked at, not ignored. The example is
-          # documentation, so it builds at /W4 without /WX and is not gated.
-          $out = cmd /c "call `"$vcvars`" >nul 2>&1 && cl /nologo /W4 /WX /I include examples/c/contract.c /Fe:target/release/contract.exe /link target/release/winrecovery.dll.lib 2>&1"
-          $code = $LASTEXITCODE
-          Write-Host ($out -join "\n")
-          if ($code -ne 0) { Report-Failure 'cl contract.c' ($out -join "\n") $code }
+            $vsAll = & $vswhere -latest -all -prerelease -property installationPath
+            Write-Host "VS installs (any workload): $($vsAll -join ' | ')"
 
-          $out = cmd /c "call `"$vcvars`" >nul 2>&1 && cl /nologo /W4 /I include examples/c/example.c /Fe:target/release/example.exe /link target/release/winrecovery.dll.lib 2>&1"
-          $code = $LASTEXITCODE
-          Write-Host ($out -join "\n")
-          if ($code -ne 0) { Report-Failure 'cl example.c' ($out -join "\n") $code }
+            $vsPath = & $vswhere -latest -all -prerelease -requires VC.Tools.x86.x64 -property installationPath |
+              Select-Object -First 1
+            if (-not $vsPath) {
+              Report-Failure 'no Visual Studio with VC.Tools.x86.x64' "vswhere saw: $($vsAll -join ' | ')"
+            }
+            Write-Host "Visual Studio: $vsPath"
 
-          Write-Host 'MSVC build OK'
+            # vcvars64.bat rather than the DevShell PowerShell module: it is the
+            # documented MSVC entry point, exists in every VS layout (2022 and
+            # 2026), and running the compiler in the same cmd invocation as the
+            # environment setup avoids depending on how the module exports env
+            # vars into pwsh.
+            $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+            if (-not (Test-Path $vcvars)) {
+              $found = Get-ChildItem -Path (Join-Path $vsPath 'VC') -Recurse -Filter 'vcvars*.bat' -ErrorAction SilentlyContinue |
+                Select-Object -ExpandProperty FullName
+              Report-Failure 'vcvars64.bat not found' "expected $vcvars; found: $($found -join ' | ')"
+            }
+            Write-Host "vcvars: $vcvars"
+
+            foreach ($f in 'winrecovery.dll', 'winrecovery.dll.lib') {
+              if (-not (Test-Path "target/release/$f")) {
+                Report-Failure 'missing Rust build output' "target/release/$f"
+              }
+            }
+
+            # Print the compiler version so a failure is attributable to a
+            # specific toolchain.
+            $verOut = cmd /c "call "$vcvars" >nul 2>&1 && cl 2>&1"
+            Write-Host ($verOut -join "\n")
+
+            # /W4 /WX on the contract test: it is the gated assertion, so a new
+            # warning there should be looked at, not ignored. The example is
+            # documentation, so it builds at /W4 without /WX and is not gated.
+            $out = cmd /c "call "$vcvars" >nul 2>&1 && cl /nologo /W4 /WX /I include examples/c/contract.c /Fe:target/release/contract.exe /link target/release/winrecovery.dll.lib 2>&1"
+            $code = $LASTEXITCODE
+            Write-Host ($out -join "\n")
+            if ($code -ne 0) { Report-Failure "cl contract.c (exit $code)" ($out -join "\n") }
+
+            $out = cmd /c "call "$vcvars" >nul 2>&1 && cl /nologo /W4 /I include examples/c/example.c /Fe:target/release/example.exe /link target/release/winrecovery.dll.lib 2>&1"
+            $code = $LASTEXITCODE
+            Write-Host ($out -join "\n")
+            if ($code -ne 0) { Report-Failure "cl example.c (exit $code)" ($out -join "\n") }
+
+            Write-Host 'MSVC build OK'
+          } catch {
+            # Catch anything the explicit checks missed, so no failure can exit
+            # silently again.
+            Report-Failure 'MSVC step threw' "$_"
+          }
+
 
       # contract.exe is the assertion: every read-only entry point must obey
       # the documented contract (non-NULL valid JSON, or NULL plus a WR_ERR_*

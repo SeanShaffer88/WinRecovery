@@ -46,6 +46,13 @@ bump. Additive changes (new `wr_*` entry points) are minor bumps.
   nothing and needs no DLL, so it cannot mutate a runner. A syntax error in
   the verification script would otherwise surface only on the one machine
   someone finally runs it on.
+- A "PowerShell notes (for verification scripts)" section in `AGENTS.md`.
+  Every DLL in the collection needs an on-machine verification script, so the
+  traps found here are recorded for reuse: `PtrToStringAnsi` corrupting UTF-8,
+  `AllocHGlobal` buffers never going to `wr_free_string`, `-contains` on a
+  scalar string always being false, `[string]` parameters binding `$null` as
+  `""`, BOM-less `.ps1` files being read as ANSI by PowerShell 5.1, and
+  keeping `BLOCKED` distinct from `FAIL`.
 
 ### Changed
 

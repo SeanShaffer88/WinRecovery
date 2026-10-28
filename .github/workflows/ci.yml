@@ -37,23 +37,13 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      # Recorded in the job summary: the toolchain a failure was produced by is
-      # the first thing needed to diagnose it, and CI logs are not always
-      # reachable from every environment.
+      # Printed so any later failure is attributable to a specific toolchain.
       - name: Record toolchain
         shell: bash
         run: |
           rustc --version
           cargo --version
           cargo clippy --version
-          {
-            echo '### Toolchain (windows-latest)'
-            echo '```'
-            rustc --version
-            cargo --version
-            cargo clippy --version
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: cargo fmt
         run: cargo fmt --all -- --check
@@ -74,24 +64,6 @@ jobs:
       # library and run it. This is the evidence behind the README's
       # "C consumer smoke test passes" line — the Rust tests can only see the
       # Rust side of the ABI.
-      # Records what MSVC toolchain is actually present on the runner, into
-      # the job summary (readable without the raw logs) and the build log.
-      - name: Record MSVC toolchain layout
-        shell: bash
-        run: |
-          {
-            echo '### MSVC toolchain layout (windows-latest)'
-            echo '```'
-            ls -1 "/c/Program Files/Microsoft Visual Studio" 2>&1 || true
-            echo '--- vswhere: all instances with VC tools ---'
-            "/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" \
-              -all -prerelease -requires VC.Tools.x86.x64 \
-              -property installationPath 2>&1 || true
-            echo '--- DevShell module present? ---'
-            ls -1 "/c/Program Files/Microsoft Visual Studio/Common7/Tools/Microsoft.VisualStudio.DevShell.dll" 2>&1 || true
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
       - name: Build C consumer tests (MSVC)
         shell: pwsh
         env:
@@ -289,14 +261,6 @@ jobs:
           rustc --version
           cargo --version
           cargo clippy --version
-          {
-            echo '### Toolchain (ubuntu-latest, cross-target)'
-            echo '```'
-            rustc --version
-            cargo --version
-            cargo clippy --version
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: cargo fmt
         run: cargo fmt --all -- --check

@@ -8,6 +8,18 @@
 
 ---
 
+## CI notes (learned the hard way)
+
+- Both jobs are part of the gate. On `windows-latest` the host triple already *is* `x86_64-pc-windows-msvc`, so `clippy --target x86_64-pc-windows-msvc` there is a no-op that proves nothing. The `cross` job on `ubuntu-latest` is what actually enforces the cross-target gate. Do not delete it as "redundant".
+- `windows-latest` ships **Visual Studio 18 (2026) Enterprise** (confirmed Oct 2026). Never hardcode a VS version path — a pinned `...\Microsoft Visual Studio\2022\Enterprise` broke the build when the image moved. Discover the install with `vswhere`, then probe for `VC\Auxiliary\Build\vcvars64.bat`.
+- Do **not** filter vswhere with `-requires VC.Tools.x86.x64`. That component ID is not registered on VS 18 even though the MSVC toolchain is present and the Rust MSVC target links fine, so the filter selects nothing. Test for `vcvars64.bat` instead.
+- Do **not** pass a quoted command string from `pwsh` into `cmd /c`. PowerShell 7.3+ defaults to `Standard` native argument passing and escapes inner quotes as `\"`, which `cmd` does not understand; the command fails with exit 1 and **no output**, which reads like a compiler error but is not. Write a batch file to `$env:RUNNER_TEMP` and invoke that.
+- Build C through `vcvars64.bat`, not the DevShell PowerShell module: it is the documented MSVC entry point and exists in every VS layout (2022 and 2026).
+- CI logs are not readable from every development environment: raw job logs are served from `results-receiver.actions.githubusercontent.com`, artifact bytes from `productionresultssa*.blob.core.windows.net`, and job summaries are not exposed through the REST API (`check-runs` `output.summary` is null). Any step that can fail opaquely should post its own captured output to the PR — see `Report-Failure` in the MSVC step. That is why the workflow holds `pull-requests: write`.
+- Never suppress output on a command that might fail (`>nul 2>&1`). It is what made the mangled `cmd /c` failure look like a compiler bug for several runs.
+
+---
+
 ## Development standard
 
 This project follows SEAN's **Universal Windows Desktop Master Prompt** — the standing development standard for all of SEAN's Windows desktop projects, current and future. The full text is maintained by SEAN (ask him for the current version); this section is the in-repo summary, and the project's own instructions add project-specific requirements on top of it.

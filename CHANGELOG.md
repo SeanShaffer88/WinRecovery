@@ -30,6 +30,10 @@ bump. Additive changes (new `wr_*` entry points) are minor bumps.
   already pointed at CI artifacts that did not exist.
 - `workflow_dispatch` trigger on CI, so a build can be produced for
   on-machine verification without a throwaway commit.
+- A "CI notes (learned the hard way)" section in `AGENTS.md`, covering Visual
+  Studio discovery on `windows-latest`, the `pwsh`-to-`cmd` quoting trap, and
+  the fact that CI logs, artifacts, and job summaries are not reachable from
+  every development environment.
 
 ### Changed
 
@@ -46,6 +50,24 @@ bump. Additive changes (new `wr_*` entry points) are minor bumps.
 
 - `AGENTS.md` referenced `src/platform/windows.rs`; the Windows bindings live
   in the `mod windows` inside `src/platform.rs`.
+- MSVC discovery on `windows-latest`. The image now ships Visual Studio 18
+  (2026) Enterprise, so the step's hardcoded `...\2022\Enterprise` path no
+  longer exists. The step now enumerates installs with `vswhere` and probes
+  each for `VC\Auxiliary\Build\vcvars64.bat`, which survives future image
+  moves. Filtering `vswhere` on `-requires VC.Tools.x86.x64` was also tried
+  and does not work: that component ID is not registered on VS 18 even though
+  the toolchain is present and the Rust MSVC target links against it.
+- The C build no longer passes a quoted command string from `pwsh` into
+  `cmd /c`. PowerShell 7.3+ escapes inner quotes as `\"`, which `cmd` does not
+  understand, so the compiler never ran and the step failed with exit 1 and no
+  output — indistinguishable from a compile error. It now writes a batch file
+  to `$env:RUNNER_TEMP` with distinct exit codes per phase (1 `vcvars`,
+  2 `contract.c`, 3 `example.c`) and stops suppressing `vcvars` output.
+- The MSVC step reports its own captured output to the pull request when it
+  fails, because the failure was otherwise undiagnosable: raw logs, artifact
+  bytes, and job summaries are all unreachable from restricted environments.
+  An earlier revision declared that reporter *after* the discovery code that
+  could throw, so setup failures still exited silently.
 
 ## [0.1.0] — unreleased foundation build
 

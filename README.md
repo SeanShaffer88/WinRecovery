@@ -125,12 +125,14 @@ Labels follow the project standard: **Verified** (ran and passed),
   honest.
 - **Partially verified** — C consumer contract test
   ([`examples/c/contract.c`](examples/c/contract.c)): compiled with MSVC
-  against the built import library and run in CI. It proves the exported
-  symbols link, the ownership rules hold, and every read-only call either
-  returns valid JSON or fails with a `WR_ERR_*` code plus a non-empty
+  against the built import library and run in CI, green on a `windows-latest`
+  runner whose toolchain is Visual Studio 18 (2026) Enterprise. It proves the
+  exported symbols link, the ownership rules hold, and every read-only call
+  either returns valid JSON or fails with a `WR_ERR_*` code plus a non-empty
   `wr_last_error()`. It does **not** prove the returned data is correct — a
   CI runner has no meaningful restore points, Recycle Bin contents, or
-  installed programs.
+  installed programs, and a clean failure satisfies the contract just as a
+  success does.
 - **Unverified** — the enumeration and mutation calls against a live Windows
   machine's real data: restore-point create/list/delete, Recycle Bin
   contents and emptying, System Protection status, SCM service and driver

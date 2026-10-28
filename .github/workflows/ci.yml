@@ -1,23 +1,283 @@
-# Prepared CI workflow for WinRecovery.
-# To enable: copy this file to .github/workflows/ci.yml in the repo
-# (GitHub requires workflow files to be added through the web UI or a
-# token with the workflows permission).
+# WinRecovery CI — the gate from AGENTS.md, enforced.
+#
+# Two jobs, because a Windows-only host can never fail the cross-target steps
+# that AGENTS.md requires: on `windows-latest` the host triple already *is*
+# x86_64-pc-windows-msvc, so `clippy --target x86_64-pc-windows-msvc` is a
+# no-op that proves nothing. CI run #1 failed on Windows-only lints the host
+# clippy could not see; the `cross` job below is what keeps that class of
+# failure caught when the host is not Windows.
+#
+#   gate   windows-latest  full suite natively, C consumer build, artifacts
+#   cross  ubuntu-latest   pure-logic suite + the mandated Windows-target gate
 name: ci
 on:
   push:
     branches: [main]
   pull_request:
+  # Manual trigger, so a green build can be produced for on-machine
+  # verification without a throwaway commit.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Only so the MSVC step can post its own compiler output to the PR when it
+  # fails; see the note on Report-Failure below.
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   gate:
+    name: gate (windows-latest)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test --locked
-      - run: cargo build --release --locked
-      - name: Show artifacts
-        run: dir target\release\winrecovery.dll, target\release\winrecovery.dll.lib
+
+      # Printed so any later failure is attributable to a specific toolchain.
+      - name: Record toolchain
+        shell: bash
+        run: |
+          rustc --version
+          cargo --version
+          cargo clippy --version
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      # Host clippy. On this runner the host is the MSVC target, so this is
+      # also the Windows-target clippy pass AGENTS.md asks for; the `cross`
+      # job runs the same target from a non-Windows host.
+      - name: clippy (host = x86_64-pc-windows-msvc)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: test (full suite, natively on Windows)
+        run: cargo test --locked
+
+      - name: release build
+        run: cargo build --release --locked
+
+      # The C consumer contract: compile real C against the built import
+      # library and run it. This is the evidence behind the README's
+      # "C consumer smoke test passes" line — the Rust tests can only see the
+      # Rust side of the ABI.
+      - name: Build C consumer tests (MSVC)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # Defined first, before anything that can fail. An earlier revision
+          # declared this *after* the toolchain-discovery code, so a failure
+          # there threw into the job log and reported nothing — the log host is
+          # unreachable from some development environments and the job summary
+          # is not exposed via the REST API, which made the step undiagnosable.
+          # Everything below is wrapped so any failure posts its own reason.
+          function Report-Failure([string]$phase, [string]$detail) {
+            Write-Host "--- FAILED: $phase ---"
+            Write-Host $detail
+            if ('${{ github.event_name }}' -eq 'pull_request') {
+              $lines = @($detail -split "\r?\n")
+              if ($lines.Count -gt 90) { $lines = $lines[-90..-1] }
+              $nl = [Environment]::NewLine
+              $body = "### CI: $phase" + $nl + $nl +
+                "- Commit: ${{ github.sha }}" + $nl +
+                "- Runner: ${{ runner.os }}" + $nl + $nl +
+                '```' + $nl + ($lines -join $nl) + $nl + '```'
+              try {
+                gh pr comment ${{ github.event.pull_request.number }} --body $body 2>&1 |
+                  Write-Host
+              } catch {
+                Write-Host "could not post the PR comment: $_"
+              }
+            }
+            exit 1
+          }
+
+          try {
+            # The Rust MSVC target already links on this runner, so a VC
+            # toolchain is installed; vswhere is the supported way to find it.
+            # Locate it rather than hardcoding a version directory:
+            # `windows-latest` is a moving label (Server 2022 -> 2025, VS2026
+            # images rolling out) and a pinned path breaks when it moves.
+            $vswhere = @(
+              (Join-Path $env:ProgramFiles 'Microsoft Visual Studio\Installer\vswhere.exe'),
+              (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe')
+            ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if (-not $vswhere) {
+              Report-Failure 'vswhere.exe not found' "looked under $env:ProgramFiles and ${env:ProgramFiles(x86)}"
+            }
+            Write-Host "vswhere: $vswhere"
+
+            # Do NOT filter on -requires VC.Tools.x86.x64. windows-latest now
+            # ships Visual Studio 18 (2026) Enterprise, where that component ID
+            # is not registered even though the MSVC toolchain is present and
+            # the Rust x86_64-pc-windows-msvc target links fine in the step
+            # above. Filtering on it selected nothing and failed the build.
+            # Enumerate every install and test the real precondition instead:
+            # does it have vcvars64.bat?
+            $vsInstalls = @(& $vswhere -latest -all -prerelease -property installationPath |
+              Where-Object { $_ })
+            if ($vsInstalls.Count -eq 0) {
+              Report-Failure 'vswhere found no Visual Studio install' "vswhere: $vswhere"
+            }
+            Write-Host "VS installs: $($vsInstalls -join ' | ')"
+
+            $vcvars = $null
+            $vsPath = $null
+            foreach ($cand in $vsInstalls) {
+              # vcvars64.bat is used rather than the DevShell PowerShell module:
+              # it is the documented MSVC entry point, exists in every VS layout
+              # (2022 and 2026), and running the compiler in the same cmd
+              # invocation as the environment setup avoids depending on how the
+              # module exports env vars into pwsh.
+              $try = Join-Path $cand 'VC\Auxiliary\Build\vcvars64.bat'
+              Write-Host "checking $try"
+              if (Test-Path $try) { $vcvars = $try; $vsPath = $cand; break }
+            }
+            if (-not $vcvars) {
+              $found = $vsInstalls | ForEach-Object {
+                Get-ChildItem -Path (Join-Path $_ 'VC') -Recurse -Filter 'vcvars*.bat' -ErrorAction SilentlyContinue |
+                  Select-Object -ExpandProperty FullName
+              }
+              Report-Failure 'no vcvars64.bat in any VS install' "installs: $($vsInstalls -join ' | '); vcvars found: $($found -join ' | ')"
+            }
+            Write-Host "Visual Studio: $vsPath"
+            Write-Host "vcvars: $vcvars"
+
+            foreach ($f in 'winrecovery.dll', 'winrecovery.dll.lib') {
+              if (-not (Test-Path "target/release/$f")) {
+                Report-Failure 'missing Rust build output' "target/release/$f"
+              }
+            }
+
+            # Build through a generated batch file instead of passing a quoted
+            # command string from pwsh to cmd. PowerShell 7.3+ defaults to
+            # `Standard` native argument passing, which escapes inner quotes as
+            # \" -- a form cmd does not understand -- so
+            #   cmd /c "call "<path with spaces>" >nul 2>&1 && cl ..."
+            # arrives mangled, cl never runs, and the step fails with exit 1 and
+            # no output (exactly what run #7 reported). A batch file has no such
+            # indirection, and vcvars output is no longer suppressed, so a
+            # failure there is visible instead of hidden behind >nul.
+            $tmp = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }
+            $bat = Join-Path $tmp 'winrecovery-build-c.bat'
+            # Distinct exit codes, so the failing phase is identifiable even if
+            # output capture breaks again: 1 vcvars, 2 contract.c, 3 example.c.
+            $batch = @(
+              '@echo off',
+              "call `"$vcvars`"",
+              'if errorlevel 1 exit /b 1',
+              'where cl',
+              'cl /nologo /W4 /WX /I include examples/c/contract.c /Fe:target/release/contract.exe /link target/release/winrecovery.dll.lib',
+              'if errorlevel 1 exit /b 2',
+              'cl /nologo /W4 /I include examples/c/example.c /Fe:target/release/example.exe /link target/release/winrecovery.dll.lib',
+              'if errorlevel 1 exit /b 3',
+              'exit /b 0'
+            ) -join [Environment]::NewLine
+            Set-Content -Path $bat -Value $batch -Encoding ascii
+            Write-Host "--- generated $bat ---"
+            Write-Host $batch
+
+            # /W4 /WX on contract.c: it is the gated assertion, so a new warning
+            # there should be looked at, not ignored. example.c is
+            # documentation, so it builds at /W4 without /WX.
+            #
+            # ErrorActionPreference is relaxed for the invocation only: with
+            # `Stop` and 2>&1, a native command's stderr lines can surface as
+            # terminating errors, which would abort the step before the output
+            # could be reported.
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            $out = & $bat 2>&1 | ForEach-Object { "$_" }
+            $code = $LASTEXITCODE
+            $ErrorActionPreference = $prevEap
+
+            $joined = $out -join [Environment]::NewLine
+            Write-Host $joined
+            if ($code -ne 0) {
+              $phase = switch ($code) {
+                1 { 'vcvars64.bat failed' }
+                2 { 'cl contract.c failed (gated: /W4 /WX)' }
+                3 { 'cl example.c failed' }
+                default { "MSVC build failed (exit $code)" }
+              }
+              Report-Failure "$phase [exit $code]" $joined
+            }
+            Write-Host 'MSVC build OK'
+          } catch {
+            # Catch anything the explicit checks missed, so no failure can exit
+            # silently again.
+            Report-Failure 'MSVC step threw' "$_"
+          }
+
+
+      # contract.exe is the assertion: every read-only entry point must obey
+      # the documented contract (non-NULL valid JSON, or NULL plus a WR_ERR_*
+      # code and a message), whatever this machine's System Restore state is.
+      # example.exe is the documentation: it shows the happy path, so its
+      # output is printed but its exit code is not gated — a CI runner with
+      # System Restore off is not a library defect.
+      - name: Run C consumer contract test
+        run: .\target\release\contract.exe
+
+      - name: Run C example (output only, not gated)
+        continue-on-error: true
+        run: .\target\release\example.exe
+
+      # smoke-test.ps1 tells users to take the DLL from a CI run's artifacts;
+      # this is that artifact. The header is copied in so the download is
+      # self-contained for a C consumer.
+      - name: Stage header next to the binaries
+        run: copy include\winrecovery.h target\release\winrecovery.h
+
+      - name: Upload winrecovery.dll + import library + header
+        uses: actions/upload-artifact@v7
+        with:
+          name: winrecovery-windows-x64
+          path: |
+            target/release/winrecovery.dll
+            target/release/winrecovery.dll.lib
+            target/release/winrecovery.h
+          if-no-files-found: error
+          retention-days: 30
+
+  cross:
+    name: cross-target gate (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-pc-windows-msvc
+
+      - name: Record toolchain
+        run: |
+          rustc --version
+          cargo --version
+          cargo clippy --version
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      # Host clippy never sees the cfg(windows) module, so it is run for
+      # completeness only; the two steps below are the real gate.
+      - name: clippy (Linux host, pure-logic code)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: clippy (x86_64-pc-windows-msvc, all targets)
+        run: cargo clippy --target x86_64-pc-windows-msvc --all-targets -- -D warnings
+
+      - name: check (x86_64-pc-windows-msvc, all targets)
+        run: cargo check --target x86_64-pc-windows-msvc --all-targets
+
+      - name: test (pure logic + FFI contract off-Windows)
+        run: cargo test --locked
+
+      - name: release build (Linux cdylib, host)
+        run: cargo build --release --locked

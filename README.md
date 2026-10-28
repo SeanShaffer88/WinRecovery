@@ -137,10 +137,39 @@ Labels follow the project standard: **Verified** (ran and passed),
   machine's real data: restore-point create/list/delete, Recycle Bin
   contents and emptying, System Protection status, SCM service and driver
   enumeration on a populated system, and the installed-program and startup
-  lists on a real desktop. [`examples/powershell/smoke-test.ps1`](examples/powershell/smoke-test.ps1)
-  runs the read-only half of that pass; a clean run is what closes the
-  v0.1.0 release gate. Until then v0.1.0 is a foundation build and is not
-  tagged — see [`docs/API.md`](docs/API.md).
+  lists on a real desktop. Until that pass is recorded, v0.1.0 is a
+  foundation build and is not tagged.
+
+## Verifying on a Windows machine
+
+[`examples/powershell/smoke-test.ps1`](examples/powershell/smoke-test.ps1)
+runs the pass, and [`docs/VERIFICATION.md`](docs/VERIFICATION.md) is the
+record it should be written into — including, for each function, the Windows
+source to cross-check against (`Get-ComputerRestorePoint`, `vssadmin`,
+`services.msc`, Task Manager's Startup tab), because a call returning JSON is
+not the same as that JSON being correct.
+
+By default the script is read-only and changes nothing. Two opt-in phases go
+further:
+
+- `-IncludeMutations` creates **one** restore point whose description contains
+  `é ü € 中`, verifies it appears and reads back byte-for-byte, then deletes
+  exactly that point. The round trip is self-cleaning, and the delete runs in
+  a `finally` block, so an interrupted run does not strand a restore point.
+  Needs elevation and System Protection enabled.
+- `-EmptyRecycleBin` **irreversibly empties the Recycle Bin.** It is a separate
+  switch, never implied by `-IncludeMutations`: it previews the item count and
+  size, then requires you to type `EMPTY`. If input is redirected it refuses
+  rather than destroying data unattended.
+
+Results are reported as `PASS` / `FAIL` / `BLOCKED` / `SKIP` and end in a
+verdict. `BLOCKED` means the check could not run for an environmental reason
+(not elevated, System Protection off) rather than that the library
+misbehaved — keeping those apart is what stops a skipped check from being
+misread as a verified one. `-ReportPath` writes the results as markdown.
+
+CI also parse-checks the script on every run, so a syntax error cannot survive
+until the moment someone finally runs it on a real machine.
 
 ## The DLL Collection
 

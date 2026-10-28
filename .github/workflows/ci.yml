@@ -45,6 +45,35 @@ jobs:
           cargo --version
           cargo clippy --version
 
+      # Parse-only validation: builds the AST and reports syntax errors without
+      # executing anything, so it needs no DLL and calls no Win32 API. This is
+      # what keeps the verification scripts trustworthy -- they are the tool
+      # that closes the release gate, and a syntax error in one would only
+      # surface on the machine someone finally runs it on.
+      - name: Validate PowerShell syntax
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $failed = $false
+          $files = @(Get-ChildItem -Path examples/powershell -Filter *.ps1 -File)
+          if ($files.Count -eq 0) { throw 'no .ps1 files found under examples/powershell' }
+          foreach ($f in $files) {
+            $errors = $null
+            $tokens = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              $f.FullName, [ref]$tokens, [ref]$errors)
+            if ($errors -and $errors.Count -gt 0) {
+              $failed = $true
+              Write-Host "FAIL $($f.Name): $($errors.Count) parse error(s)"
+              foreach ($e in $errors) {
+                Write-Host "  line $($e.Extent.StartLineNumber): $($e.Message)"
+              }
+            } else {
+              Write-Host "PASS $($f.Name): parsed cleanly ($($tokens.Count) tokens)"
+            }
+          }
+          if ($failed) { exit 1 }
+
       - name: cargo fmt
         run: cargo fmt --all -- --check
 

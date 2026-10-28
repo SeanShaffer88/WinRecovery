@@ -20,6 +20,49 @@
 
 ---
 
+## PowerShell notes (for verification scripts)
+
+Every DLL in the collection needs an on-machine verification script, and these
+traps are not specific to WinRecovery. CI parse-checks every `.ps1` under
+`examples/powershell` via the AST parser, so syntax is caught — semantics are
+not, and there is no PowerShell in most development environments to test with.
+
+- **Never use `Marshal.PtrToStringAnsi` to read this library's strings.** They
+  are UTF-8; `PtrToStringAnsi` decodes with the process ANSI code page and
+  silently corrupts every non-ASCII sequence (accents, CJK, curly quotes, the
+  euro sign). A verification script that mangles the data will report the
+  mangling as a `PASS`. `Marshal.PtrToStringUTF8` does **not** exist on .NET
+  Framework, so Windows PowerShell 5.1 needs an explicit NUL scan plus
+  `Encoding.UTF8.GetString`.
+- Buffers allocated with `Marshal.AllocHGlobal` are freed with
+  `Marshal.FreeHGlobal` — never `wr_free_string`, which hands them to the
+  library's allocator and mismatches the heap.
+- `'abc' -contains 'a'` is **always false**. `-contains` compares against a
+  collection's elements, and a scalar string is a one-element collection whose
+  only element is the whole string. Use `.IndexOf([string]$c) -ge 0` for
+  character membership.
+- A `[string]`-typed parameter binds `$null` as `""`, so `$null -eq $Json` is
+  false on a failed call. Use `[string]::IsNullOrEmpty()`, or the real error
+  gets reported as "invalid JSON".
+- Build non-ASCII literals from code points (`[char]0x00E9`), not from
+  characters typed into the file: Windows PowerShell 5.1 reads a BOM-less
+  `.ps1` as ANSI, so literal accents are corrupted before the DLL sees them.
+- In a here-string the closing `"@` must be at column 0, and a backtick line
+  continuation must have **no** trailing whitespace — both fail in ways that
+  look unrelated to the actual mistake.
+- Give the P/Invoke class a unique name per run and capture it with
+  `Add-Type -PassThru`; a fixed name fails with "type already exists" the
+  second time the script runs in one session.
+- Distinguish `BLOCKED` from `FAIL` in results. A check that could not run
+  because the shell was not elevated, or because System Protection was off, is
+  Windows behaving correctly — not a library defect. Collapsing them records an
+  environmental limit as a bug and a skipped check as a verified one.
+- Prefer a generated script or batch file over passing quoted command strings
+  between shells, and keep destructive actions behind their own switch with a
+  preview and a typed confirmation.
+
+---
+
 ## Development standard
 
 This project follows SEAN's **Universal Windows Desktop Master Prompt** — the standing development standard for all of SEAN's Windows desktop projects, current and future. The full text is maintained by SEAN (ask him for the current version); this section is the in-repo summary, and the project's own instructions add project-specific requirements on top of it.

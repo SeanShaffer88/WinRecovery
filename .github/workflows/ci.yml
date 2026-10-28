@@ -111,10 +111,11 @@ jobs:
             if ('${{ github.event_name }}' -eq 'pull_request') {
               $lines = @($detail -split "\r?\n")
               if ($lines.Count -gt 90) { $lines = $lines[-90..-1] }
-              $body = "### CI: $phase" + "\n\n" +
-                "- Commit: ${{ github.sha }}" + "\n" +
-                "- Runner: ${{ runner.os }}" + "\n\n" +
-                '```' + "\n" + ($lines -join "\n") + "\n" + '```'
+              $nl = [Environment]::NewLine
+              $body = "### CI: $phase" + $nl + $nl +
+                "- Commit: ${{ github.sha }}" + $nl +
+                "- Runner: ${{ runner.os }}" + $nl + $nl +
+                '```' + $nl + ($lines -join $nl) + $nl + '```'
               try {
                 gh pr comment ${{ github.event.pull_request.number }} --body $body 2>&1 |
                   Write-Host
@@ -140,27 +141,40 @@ jobs:
             }
             Write-Host "vswhere: $vswhere"
 
-            $vsAll = & $vswhere -latest -all -prerelease -property installationPath
-            Write-Host "VS installs (any workload): $($vsAll -join ' | ')"
+            # Do NOT filter on -requires VC.Tools.x86.x64. windows-latest now
+            # ships Visual Studio 18 (2026) Enterprise, where that component ID
+            # is not registered even though the MSVC toolchain is present and
+            # the Rust x86_64-pc-windows-msvc target links fine in the step
+            # above. Filtering on it selected nothing and failed the build.
+            # Enumerate every install and test the real precondition instead:
+            # does it have vcvars64.bat?
+            $vsInstalls = @(& $vswhere -latest -all -prerelease -property installationPath |
+              Where-Object { $_ })
+            if ($vsInstalls.Count -eq 0) {
+              Report-Failure 'vswhere found no Visual Studio install' "vswhere: $vswhere"
+            }
+            Write-Host "VS installs: $($vsInstalls -join ' | ')"
 
-            $vsPath = & $vswhere -latest -all -prerelease -requires VC.Tools.x86.x64 -property installationPath |
-              Select-Object -First 1
-            if (-not $vsPath) {
-              Report-Failure 'no Visual Studio with VC.Tools.x86.x64' "vswhere saw: $($vsAll -join ' | ')"
+            $vcvars = $null
+            $vsPath = $null
+            foreach ($cand in $vsInstalls) {
+              # vcvars64.bat is used rather than the DevShell PowerShell module:
+              # it is the documented MSVC entry point, exists in every VS layout
+              # (2022 and 2026), and running the compiler in the same cmd
+              # invocation as the environment setup avoids depending on how the
+              # module exports env vars into pwsh.
+              $try = Join-Path $cand 'VC\Auxiliary\Build\vcvars64.bat'
+              Write-Host "checking $try"
+              if (Test-Path $try) { $vcvars = $try; $vsPath = $cand; break }
+            }
+            if (-not $vcvars) {
+              $found = $vsInstalls | ForEach-Object {
+                Get-ChildItem -Path (Join-Path $_ 'VC') -Recurse -Filter 'vcvars*.bat' -ErrorAction SilentlyContinue |
+                  Select-Object -ExpandProperty FullName
+              }
+              Report-Failure 'no vcvars64.bat in any VS install' "installs: $($vsInstalls -join ' | '); vcvars found: $($found -join ' | ')"
             }
             Write-Host "Visual Studio: $vsPath"
-
-            # vcvars64.bat rather than the DevShell PowerShell module: it is the
-            # documented MSVC entry point, exists in every VS layout (2022 and
-            # 2026), and running the compiler in the same cmd invocation as the
-            # environment setup avoids depending on how the module exports env
-            # vars into pwsh.
-            $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
-            if (-not (Test-Path $vcvars)) {
-              $found = Get-ChildItem -Path (Join-Path $vsPath 'VC') -Recurse -Filter 'vcvars*.bat' -ErrorAction SilentlyContinue |
-                Select-Object -ExpandProperty FullName
-              Report-Failure 'vcvars64.bat not found' "expected $vcvars; found: $($found -join ' | ')"
-            }
             Write-Host "vcvars: $vcvars"
 
             foreach ($f in 'winrecovery.dll', 'winrecovery.dll.lib') {

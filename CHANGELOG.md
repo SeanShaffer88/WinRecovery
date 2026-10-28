@@ -33,8 +33,11 @@ bump. Additive changes (new `wr_*` entry points) are minor bumps.
 
 ### Changed
 
-- `wr_version()` is now built from `crate::VERSION` at compile time instead of
-  a second hardcoded version literal that could drift from it.
+- `wr_version()` is now derived from `crate::VERSION` at compile time instead
+  of a second hardcoded version literal that could drift from it, and the
+  `version_exports` test now also asserts the NUL terminator sits exactly past
+  the string (a truncating derivation would otherwise still read back as a
+  shorter-but-valid string).
 - Removed the root `ci.yml`. It was a byte-identical copy of the live
   workflow left over from when GitHub required workflows to be added through
   the web UI; two copies of a gate is a way to end up with neither enforced.

@@ -117,13 +117,25 @@ fn require_c_str(p: *const c_char) -> Result<String, (i32, String)> {
 /// Static version string; do NOT free.
 #[no_mangle]
 pub extern "C" fn wr_version() -> *const c_char {
-    // Library-owned static, so there is nothing to allocate or free. Built
-    // from [`crate::VERSION`] at compile time (const `&str` concatenation is
-    // stable since 1.79; this crate's floor is 1.80) rather than repeating
-    // the version literal here — a hardcoded copy silently drifts from
-    // `VERSION` on the next bump, and the `version_exports` test compares the
-    // two.
-    static VERSION_C: &[u8] = concat!(crate::VERSION, "\0").as_bytes();
+    // Library-owned static: nothing to allocate, nothing to free. Derived from
+    // [`crate::VERSION`] at compile time rather than repeating the version
+    // literal here, so the two cannot drift at the next bump.
+    //
+    // Deliberately avoids `concat!(crate::VERSION, "\0")`: passing a `const`
+    // path to `concat!` is not something this crate needs to depend on, and
+    // the array form below compiles on any Rust that can build this crate at
+    // all. `VERSION` is a plain ASCII version string, so `as_bytes()` cannot
+    // split a character, and `len() + 1` is the exact array length.
+    static VERSION_C: [u8; crate::VERSION.len() + 1] = {
+        let bytes = crate::VERSION.as_bytes();
+        let mut buf = [0u8; crate::VERSION.len() + 1];
+        let mut i = 0;
+        while i < bytes.len() {
+            buf[i] = bytes[i];
+            i += 1;
+        }
+        buf // trailing byte stays 0: the NUL terminator
+    };
     VERSION_C.as_ptr() as *const c_char
 }
 
@@ -285,6 +297,21 @@ mod tests {
         let s = unsafe { CStr::from_ptr(v) }.to_str().unwrap();
         assert_eq!(s, crate::VERSION);
         assert_eq!(wr_version_major(), 0);
+
+        // Guard the derivation in wr_version(): the byte exactly past the
+        // string must be the NUL, and none before it may be. Without this, a
+        // truncating or off-by-one version of that array would still read back
+        // as a shorter-but-valid string.
+        let nul_at = crate::VERSION.len();
+        // SAFETY: wr_version() returns a pointer to a static
+        // [u8; VERSION.len() + 1], so both offsets are in bounds.
+        let tail_zero = unsafe { *v.add(nul_at) } == 0;
+        assert!(tail_zero, "missing NUL terminator after the version string");
+        assert_eq!(
+            unsafe { CStr::from_ptr(v) }.to_bytes().len(),
+            nul_at,
+            "version string is truncated or contains an interior NUL"
+        );
     }
 
     #[test]

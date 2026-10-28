@@ -34,6 +34,18 @@ bump. Additive changes (new `wr_*` entry points) are minor bumps.
   Studio discovery on `windows-latest`, the `pwsh`-to-`cmd` quoting trap, and
   the fact that CI logs, artifacts, and job summaries are not reachable from
   every development environment.
+- `docs/VERIFICATION.md`: the on-machine verification record. An environment
+  table, then a per-function matrix naming the Windows source each result
+  must be cross-checked against (`Get-ComputerRestorePoint`, `vssadmin list
+  shadowstorage`, `services.msc`, Task Manager's Startup tab, Explorer's
+  Recycle Bin properties), plus separate UTF-8, mutation, destructive and
+  error-path sections and a sign-off block. A call returning JSON is not
+  verification, so each row states what correct looks like.
+- CI parse-checks every `.ps1` under `examples/powershell` on
+  `windows-latest` via the PowerShell AST parser. Parse-only: it executes
+  nothing and needs no DLL, so it cannot mutate a runner. A syntax error in
+  the verification script would otherwise surface only on the one machine
+  someone finally runs it on.
 
 ### Changed
 
@@ -45,9 +57,50 @@ bump. Additive changes (new `wr_*` entry points) are minor bumps.
 - Removed the root `ci.yml`. It was a byte-identical copy of the live
   workflow left over from when GitHub required workflows to be added through
   the web UI; two copies of a gate is a way to end up with neither enforced.
+- `examples/powershell/smoke-test.ps1` grew from a read-only smoke test into
+  the gate's full verification pass. It reports `PASS` / `FAIL` / `BLOCKED` /
+  `SKIP` per check with a closing verdict, detects elevation, cross-checks
+  `wr_version` against its `_major`/`_minor`/`_patch` parts, queries the
+  Recycle Bin for a specific drive as well as all drives, asserts that
+  `wr_list_drivers_json` equals the `is_driver` subset of
+  `wr_list_services_json`, and writes markdown via `-ReportPath`.
+- Two opt-in phases replace the read-only-only scope. `-IncludeMutations`
+  creates one restore point whose description contains `é ü € 中`, verifies it
+  appears and reads back unchanged, then deletes exactly that point. It is
+  self-cleaning, the delete sits in a `finally` block so an interrupted run
+  cannot strand a restore point, and it recovers if the created point could
+  not be identified. `-EmptyRecycleBin` is separate and never implied by
+  `-IncludeMutations`: it previews item count and size, requires typing
+  `EMPTY`, and refuses when input is redirected.
+- `BLOCKED` is now distinguished from `FAIL`. A check that could not run
+  because the shell was not elevated, or because System Protection was off,
+  is Windows behaving correctly rather than a library defect. Without that
+  distinction an environmental limit reads as a bug, and a skipped check
+  reads as a verified one.
+- The P/Invoke type name is unique per run and the compiled type is captured
+  with `Add-Type -PassThru`, so re-running in one session, or against a second
+  DLL, no longer fails with "type already exists".
 
 ### Fixed
 
+- `smoke-test.ps1` decoded the library's UTF-8 strings with
+  `Marshal.PtrToStringAnsi`, which uses the process ANSI code page and so
+  corrupted every non-ASCII byte sequence — accented program names, CJK
+  publishers, curly quotes. The verification tool could not read the UTF-8
+  contract it existed to check, and would have reported mangled data as a
+  pass. Replaced with an explicit NUL scan plus `Encoding.UTF8.GetString`,
+  because `Marshal.PtrToStringUTF8` does not exist on .NET Framework
+  (Windows PowerShell 5.1).
+- Incoming strings are now allocated as UTF-8 and released with
+  `Marshal.FreeHGlobal`, never `wr_free_string`: that buffer came from
+  `AllocHGlobal`, so handing it to the library's allocator would mismatch the
+  heap.
+- The description filter in the mutation check used `' -_.()' -contains $_`,
+  which is always false — `-contains` compares against a collection's
+  elements, and a scalar string is a one-element collection whose only
+  element is the whole string. Spaces, hyphens, underscores, dots and parens
+  were therefore stripped from the *expected* value, so a correct round trip
+  would have been reported as a mismatch.
 - `AGENTS.md` referenced `src/platform/windows.rs`; the Windows bindings live
   in the `mod windows` inside `src/platform.rs`.
 - MSVC discovery on `windows-latest`. The image now ships Visual Studio 18

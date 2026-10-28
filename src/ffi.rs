@@ -117,9 +117,13 @@ fn require_c_str(p: *const c_char) -> Result<String, (i32, String)> {
 /// Static version string; do NOT free.
 #[no_mangle]
 pub extern "C" fn wr_version() -> *const c_char {
-    // CString literal kept in a OnceLock-like static via leak-free approach:
-    // a plain byte string with a trailing NUL.
-    static VERSION_C: &[u8] = b"0.1.0\0";
+    // Library-owned static, so there is nothing to allocate or free. Built
+    // from [`crate::VERSION`] at compile time (const `&str` concatenation is
+    // stable since 1.79; this crate's floor is 1.80) rather than repeating
+    // the version literal here — a hardcoded copy silently drifts from
+    // `VERSION` on the next bump, and the `version_exports` test compares the
+    // two.
+    static VERSION_C: &[u8] = concat!(crate::VERSION, "\0").as_bytes();
     VERSION_C.as_ptr() as *const c_char
 }
 

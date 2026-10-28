@@ -7,8 +7,10 @@
 # nothing, and changes nothing.
 #
 # What you need: winrecovery.dll — build it with `cargo build --release`
-# in this repo on Windows, or take it from a CI run's artifacts. Put the
-# DLL next to this script or pass its path:
+# in this repo on Windows, or download the `winrecovery-windows-x64`
+# artifact from the run's Actions summary (it contains the DLL, its import
+# library, and winrecovery.h). Put the DLL next to this script or pass its
+# path:
 #
 #   powershell -ExecutionPolicy Bypass -File smoke-test.ps1 -DllPath C:\path\winrecovery.dll
 #

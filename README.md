@@ -101,25 +101,44 @@ cargo test                     # pure-logic tests run on any OS
 cargo check --target x86_64-pc-windows-msvc --all-targets
 ```
 
-Windows release artifacts (`winrecovery.dll` + import library) are built by
-CI on `windows-latest`.
+Windows release artifacts are built by CI on `windows-latest` and uploaded as
+the `winrecovery-windows-x64` artifact — `winrecovery.dll`,
+`winrecovery.dll.lib`, and `winrecovery.h` together, so no local Windows
+toolchain is needed to consume or verify the library.
 
 ## Verification status
 
-- Unit tests (parsing, JSON shapes, FFI error contract): **9/9 passing** on Linux.
-- `cargo clippy --all-targets -- -D warnings`: clean.
-- Windows target compile (`x86_64-pc-windows-msvc`, all targets): **passes**.
-- C consumer smoke test against the built library: **passes** (version +
-  error contract).
-- **CI green on `windows-latest`** (run for the link fix): fmt, clippy,
-  `cargo test --locked` — the full suite runs and passes natively on
-  Windows — and the release build producing `winrecovery.dll` +
-  `winrecovery.dll.lib` all pass.
-- **Not yet verified:** calling the enumeration/mutation functions against
-  a live Windows machine's real data (restore-point create/list/delete,
-  Recycle Bin contents, SCM enumeration on a populated system). The CI
-  tests exercise the FFI contract and parsers, not live system state.
-  That on-machine pass is the v0.1.0 release gate — see `docs/API.md`.
+Labels follow the project standard: **Verified** (ran and passed),
+**Partially verified** (ran, but does not cover live system state),
+**Unverified** (has not run).
+
+- **Verified** — unit tests for parsing, JSON shapes, and the FFI error
+  contract: 9 passing off-Windows, 8 natively on Windows in CI (the ninth
+  asserts the non-Windows `WR_ERR_NOT_SUPPORTED` path and is `cfg`-gated out
+  there).
+- **Verified** — `cargo fmt --all --check`, `cargo clippy --all-targets
+  -- -D warnings`, and the release build on `windows-latest`.
+- **Verified** — Windows-target compile from a non-Windows host
+  (`cargo clippy`/`check --target x86_64-pc-windows-msvc --all-targets`,
+  `ubuntu-latest` job). On Windows this is a no-op, since the host triple
+  already is the MSVC target; this job is what keeps the cross-target gate
+  honest.
+- **Partially verified** — C consumer contract test
+  ([`examples/c/contract.c`](examples/c/contract.c)): compiled with MSVC
+  against the built import library and run in CI. It proves the exported
+  symbols link, the ownership rules hold, and every read-only call either
+  returns valid JSON or fails with a `WR_ERR_*` code plus a non-empty
+  `wr_last_error()`. It does **not** prove the returned data is correct — a
+  CI runner has no meaningful restore points, Recycle Bin contents, or
+  installed programs.
+- **Unverified** — the enumeration and mutation calls against a live Windows
+  machine's real data: restore-point create/list/delete, Recycle Bin
+  contents and emptying, System Protection status, SCM service and driver
+  enumeration on a populated system, and the installed-program and startup
+  lists on a real desktop. [`examples/powershell/smoke-test.ps1`](examples/powershell/smoke-test.ps1)
+  runs the read-only half of that pass; a clean run is what closes the
+  v0.1.0 release gate. Until then v0.1.0 is a foundation build and is not
+  tagged — see [`docs/API.md`](docs/API.md).
 
 ## The DLL Collection
 

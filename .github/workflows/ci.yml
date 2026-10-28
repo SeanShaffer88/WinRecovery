@@ -1,23 +1,134 @@
-# Prepared CI workflow for WinRecovery.
-# To enable: copy this file to .github/workflows/ci.yml in the repo
-# (GitHub requires workflow files to be added through the web UI or a
-# token with the workflows permission).
+# WinRecovery CI — the gate from AGENTS.md, enforced.
+#
+# Two jobs, because a Windows-only host can never fail the cross-target steps
+# that AGENTS.md requires: on `windows-latest` the host triple already *is*
+# x86_64-pc-windows-msvc, so `clippy --target x86_64-pc-windows-msvc` is a
+# no-op that proves nothing. CI run #1 failed on Windows-only lints the host
+# clippy could not see; the `cross` job below is what keeps that class of
+# failure caught when the host is not Windows.
+#
+#   gate   windows-latest  full suite natively, C consumer build, artifacts
+#   cross  ubuntu-latest   pure-logic suite + the mandated Windows-target gate
 name: ci
 on:
   push:
     branches: [main]
   pull_request:
+  # Manual trigger, so a green build can be produced for on-machine
+  # verification without a throwaway commit.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   gate:
+    name: gate (windows-latest)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test --locked
-      - run: cargo build --release --locked
-      - name: Show artifacts
-        run: dir target\release\winrecovery.dll, target\release\winrecovery.dll.lib
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      # Host clippy. On this runner the host is the MSVC target, so this is
+      # also the Windows-target clippy pass AGENTS.md asks for; the `cross`
+      # job runs the same target from a non-Windows host.
+      - name: clippy (host = x86_64-pc-windows-msvc)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: test (full suite, natively on Windows)
+        run: cargo test --locked
+
+      - name: release build
+        run: cargo build --release --locked
+
+      # The C consumer contract: compile real C against the built import
+      # library and run it. This is the evidence behind the README's
+      # "C consumer smoke test passes" line — the Rust tests can only see the
+      # Rust side of the ABI.
+      - name: Build C consumer tests (MSVC)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Version-agnostic VS discovery: DevShell works for VS 2022 and
+          # VS 2026, so a future `windows-latest` image move does not break
+          # this step. -SkipAutomaticLocation keeps the repo as the cwd.
+          Import-Module (Join-Path
+            'C:\Program Files\Microsoft Visual Studio'
+            'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise' `
+            -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
+            throw 'cl.exe not found after Enter-VsDevShell'
+          }
+          cl /nologo /W4 /WX /I include examples/c/contract.c `
+            /Fe:target/release/contract.exe /link target/release/winrecovery.dll.lib
+          cl /nologo /W4 /I include examples/c/example.c `
+            /Fe:target/release/example.exe /link target/release/winrecovery.dll.lib
+
+      # contract.exe is the assertion: every read-only entry point must obey
+      # the documented contract (non-NULL valid JSON, or NULL plus a WR_ERR_*
+      # code and a message), whatever this machine's System Restore state is.
+      # example.exe is the documentation: it shows the happy path, so its
+      # output is printed but its exit code is not gated — a CI runner with
+      # System Restore off is not a library defect.
+      - name: Run C consumer contract test
+        run: .\target\release\contract.exe
+
+      - name: Run C example (output only, not gated)
+        continue-on-error: true
+        run: .\target\release\example.exe
+
+      # smoke-test.ps1 tells users to take the DLL from a CI run's artifacts;
+      # this is that artifact. The header is copied in so the download is
+      # self-contained for a C consumer.
+      - name: Stage header next to the binaries
+        run: copy include\winrecovery.h target\release\winrecovery.h
+
+      - name: Upload winrecovery.dll + import library + header
+        uses: actions/upload-artifact@v7
+        with:
+          name: winrecovery-windows-x64
+          path: |
+            target/release/winrecovery.dll
+            target/release/winrecovery.dll.lib
+            target/release/winrecovery.h
+          if-no-files-found: error
+          retention-days: 30
+
+  cross:
+    name: cross-target gate (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-pc-windows-msvc
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      # Host clippy never sees the cfg(windows) module, so it is run for
+      # completeness only; the two steps below are the real gate.
+      - name: clippy (Linux host, pure-logic code)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: clippy (x86_64-pc-windows-msvc, all targets)
+        run: cargo clippy --target x86_64-pc-windows-msvc --all-targets -- -D warnings
+
+      - name: check (x86_64-pc-windows-msvc, all targets)
+        run: cargo check --target x86_64-pc-windows-msvc --all-targets
+
+      - name: test (pure logic + FFI contract off-Windows)
+        run: cargo test --locked
+
+      - name: release build (Linux cdylib, host)
+        run: cargo build --release --locked

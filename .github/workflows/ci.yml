@@ -71,23 +71,80 @@ jobs:
       # library and run it. This is the evidence behind the README's
       # "C consumer smoke test passes" line — the Rust tests can only see the
       # Rust side of the ABI.
+      # Records what MSVC toolchain is actually present on the runner, into
+      # the job summary (readable without the raw logs) and the build log.
+      - name: Record MSVC toolchain layout
+        shell: bash
+        run: |
+          {
+            echo '### MSVC toolchain layout (windows-latest)'
+            echo '```'
+            ls -1 "/c/Program Files/Microsoft Visual Studio" 2>&1 || true
+            echo '--- vswhere: all instances with VC tools ---'
+            "/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" \
+              -all -prerelease -requires VC.Tools.x86.x64 \
+              -property installationPath 2>&1 || true
+            echo '--- DevShell module present? ---'
+            ls -1 "/c/Program Files/Microsoft Visual Studio/Common7/Tools/Microsoft.VisualStudio.DevShell.dll" 2>&1 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Build C consumer tests (MSVC)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # Version-agnostic VS discovery: DevShell works for VS 2022 and
-          # VS 2026, so a future `windows-latest` image move does not break
-          # this step. -SkipAutomaticLocation keeps the repo as the cwd.
-          Import-Module (Join-Path
-            'C:\Program Files\Microsoft Visual Studio'
-            'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
-          Enter-VsDevShell -VsInstallPath 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise' `
-            -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
-          if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
-            throw 'cl.exe not found after Enter-VsDevShell'
+
+          # Discover the installed Visual Studio instead of hardcoding a
+          # version directory. `windows-latest` has moved across images before
+          # (Server 2022 -> 2025, with VS2026 images rolling out), and a
+          # pinned path breaks the first time it moves again — which is what
+          # the previous revision of this step did.
+          $candidates = @(
+            (Join-Path $env:ProgramFiles 'Microsoft Visual Studio\Installer\vswhere.exe'),
+            (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe')
+          )
+          $vswhere = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $vswhere) { throw 'vswhere.exe not found' }
+
+          # Require VC.Tools.x86.x64 so this lands on an install that actually
+          # ships cl.exe rather than a Visual Studio without the C++ workload.
+          $vsPath = & $vswhere -latest -all -prerelease `
+            -requires VC.Tools.x86.x64 -property installationPath | `
+            Select-Object -First 1
+          if (-not $vsPath) { throw 'no Visual Studio install with VC tools found' }
+          Write-Host "Visual Studio: $vsPath"
+
+          # DevShell ships inside the install, so resolve it from $vsPath and
+          # fall back to the shared location.
+          $devshell = @(
+            (Join-Path $vsPath 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll'),
+            (Join-Path $env:ProgramFiles 'Microsoft Visual Studio\Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $devshell) { throw "DevShell module not found under $vsPath" }
+          Import-Module $devshell
+
+          # -SkipAutomaticLocation keeps the repo root as cwd, so the relative
+          # include/, examples/ and target/ paths below resolve.
+          Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation `
+            -DevCmdArguments '-arch=x64 -host_arch=x64'
+
+          $cl = Get-Command cl.exe -ErrorAction SilentlyContinue
+          if (-not $cl) { throw 'cl.exe not found after Enter-VsDevShell' }
+          Write-Host "Compiler: $($cl.Source)"
+          Write-Host "Location: $(Get-Location)"
+
+          foreach ($f in 'winrecovery.dll', 'winrecovery.dll.lib') {
+            $p = "target/release/$f"
+            if (-not (Test-Path $p)) { throw "missing build output: $p" }
           }
+
+          # /W4 /WX on the contract test: it is the gated assertion, so a new
+          # warning there should be looked at, not ignored. The example is
+          # documentation, so it builds at /W4 without /WX and is not gated.
+          Write-Host '--- cl contract.c ---'
           cl /nologo /W4 /WX /I include examples/c/contract.c `
             /Fe:target/release/contract.exe /link target/release/winrecovery.dll.lib
+          Write-Host '--- cl example.c ---'
           cl /nologo /W4 /I include examples/c/example.c `
             /Fe:target/release/example.exe /link target/release/winrecovery.dll.lib
 

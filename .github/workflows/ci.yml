@@ -20,6 +20,8 @@ on:
 
 permissions:
   contents: read
+  # Only so the failure-report step below can post build diagnostics to the PR.
+  pull-requests: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -147,6 +149,44 @@ jobs:
           Write-Host '--- cl example.c ---'
           cl /nologo /W4 /I include examples/c/example.c `
             /Fe:target/release/example.exe /link target/release/winrecovery.dll.lib
+
+      # Debuggability: GitHub serves raw job logs from
+      # results-receiver.actions.githubusercontent.com, which is unreachable
+      # from some development environments (and the job summary is not exposed
+      # through the REST API either). When this job fails on a pull request,
+      # post the log as a PR comment so the failure is diagnosable from
+      # api.github.com alone.
+      - name: Report build diagnostics on failure
+        if: ${{ failure() && github.event_name == 'pull_request' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          log=ci-build.log
+          : > "$log"
+          for id in $(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs" \
+                        --paginate --jq '.jobs[] | select(.conclusion=="failure") | .id'); do
+            {
+              echo "## Job $id"
+              echo '```'
+              gh api --only-show-errors "repos/${GITHUB_REPOSITORY}/actions/jobs/$id/logs" 2>&1 ||
+                echo '(log download failed)'
+              echo '```'
+            } >> "$log"
+          done
+          if [ ! -s "$log" ]; then
+            echo "no failing-job logs could be retrieved" > "$log"
+          fi
+          # Keep the comment bounded; the tail is where the failure is.
+          tail -c 60000 "$log" > body.md
+          {
+            echo "CI failed on ${GITHUB_SHA}."
+            echo
+            cat body.md
+          } > comment.md
+          gh pr comment "${{ github.event.pull_request.number }}" \
+            --repo "$GITHUB_REPOSITORY" --body-file comment.md
 
       # contract.exe is the assertion: every read-only entry point must obey
       # the documented contract (non-NULL valid JSON, or NULL plus a WR_ERR_*

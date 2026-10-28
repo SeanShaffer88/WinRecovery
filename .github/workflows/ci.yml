@@ -20,7 +20,8 @@ on:
 
 permissions:
   contents: read
-  # Only so the failure-report step below can post build diagnostics to the PR.
+  # Only so the MSVC step can post its own compiler output to the PR when it
+  # fails; see the note on Report-Failure below.
   pull-requests: write
 
 env:
@@ -93,100 +94,85 @@ jobs:
 
       - name: Build C consumer tests (MSVC)
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
 
-          # Discover the installed Visual Studio instead of hardcoding a
-          # version directory. `windows-latest` has moved across images before
-          # (Server 2022 -> 2025, with VS2026 images rolling out), and a
-          # pinned path breaks the first time it moves again — which is what
-          # the previous revision of this step did.
-          $candidates = @(
+          # The Rust MSVC target already links on this runner, so a VC toolchain
+          # is definitely installed; vswhere is the supported way to find it.
+          # Locate it rather than hardcoding a version directory:
+          # `windows-latest` is a moving label (Server 2022 -> 2025, VS2026
+          # images rolling out), and a pinned path breaks the next time it
+          # moves — which is what an earlier revision of this step did.
+          $vswhere = @(
             (Join-Path $env:ProgramFiles 'Microsoft Visual Studio\Installer\vswhere.exe'),
             (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe')
-          )
-          $vswhere = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
           if (-not $vswhere) { throw 'vswhere.exe not found' }
 
-          # Require VC.Tools.x86.x64 so this lands on an install that actually
-          # ships cl.exe rather than a Visual Studio without the C++ workload.
-          $vsPath = & $vswhere -latest -all -prerelease `
-            -requires VC.Tools.x86.x64 -property installationPath | `
-            Select-Object -First 1
+          $vsPath = & $vswhere -latest -all -prerelease -requires VC.Tools.x86.x64 -property installationPath | Select-Object -First 1
           if (-not $vsPath) { throw 'no Visual Studio install with VC tools found' }
           Write-Host "Visual Studio: $vsPath"
 
-          # DevShell ships inside the install, so resolve it from $vsPath and
-          # fall back to the shared location.
-          $devshell = @(
-            (Join-Path $vsPath 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll'),
-            (Join-Path $env:ProgramFiles 'Microsoft Visual Studio\Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
-          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if (-not $devshell) { throw "DevShell module not found under $vsPath" }
-          Import-Module $devshell
-
-          # -SkipAutomaticLocation keeps the repo root as cwd, so the relative
-          # include/, examples/ and target/ paths below resolve.
-          Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation `
-            -DevCmdArguments '-arch=x64 -host_arch=x64'
-
-          $cl = Get-Command cl.exe -ErrorAction SilentlyContinue
-          if (-not $cl) { throw 'cl.exe not found after Enter-VsDevShell' }
-          Write-Host "Compiler: $($cl.Source)"
-          Write-Host "Location: $(Get-Location)"
+          # vcvars64.bat is used instead of the DevShell PowerShell module: it is
+          # the documented MSVC entry point, exists in every VS layout (2022 and
+          # 2026), and running the compiler in the same cmd invocation as the
+          # environment setup avoids depending on how the module exports env
+          # vars into pwsh.
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
 
           foreach ($f in 'winrecovery.dll', 'winrecovery.dll.lib') {
-            $p = "target/release/$f"
-            if (-not (Test-Path $p)) { throw "missing build output: $p" }
+            if (-not (Test-Path "target/release/$f")) {
+              throw "missing Rust build output: target/release/$f"
+            }
           }
+
+          # Posts this step's own captured output to the PR. Raw job logs are
+          # served from a host that is unreachable from some development
+          # environments, and the job summary is not exposed via the REST API,
+          # so the step reports itself instead of relying on either.
+          function Report-Failure([string]$phase, [string]$output, [int]$code) {
+            Write-Host "--- $phase failed (exit $code) ---"
+            Write-Host $output
+            if ('${{ github.event_name }}' -eq 'pull_request') {
+              $body = @(
+                "### CI: $phase failed (exit $code)",
+                '',
+                '- Runner: ${{ runner.os }} / ${{ runner.arch }}',
+                "- Visual Studio: $vsPath",
+                '- Commit: ${{ github.sha }}',
+                '',
+                '```',
+                ($output -split "\r?\n" | Select-Object -Last 90),
+                '```'
+              ) -join "\n"
+              gh pr comment ${{ github.event.pull_request.number }} --body $body 2>&1 |
+                Write-Host
+            }
+            exit 1
+          }
+
+          # Print the compiler version: it identifies the toolchain a failure
+          # came from, which is the first thing needed to diagnose it.
+          $verOut = cmd /c "call `"$vcvars`" >nul 2>&1 && cl 2>&1"
+          Write-Host ($verOut -join "\n")
 
           # /W4 /WX on the contract test: it is the gated assertion, so a new
           # warning there should be looked at, not ignored. The example is
           # documentation, so it builds at /W4 without /WX and is not gated.
-          Write-Host '--- cl contract.c ---'
-          cl /nologo /W4 /WX /I include examples/c/contract.c `
-            /Fe:target/release/contract.exe /link target/release/winrecovery.dll.lib
-          Write-Host '--- cl example.c ---'
-          cl /nologo /W4 /I include examples/c/example.c `
-            /Fe:target/release/example.exe /link target/release/winrecovery.dll.lib
+          $out = cmd /c "call `"$vcvars`" >nul 2>&1 && cl /nologo /W4 /WX /I include examples/c/contract.c /Fe:target/release/contract.exe /link target/release/winrecovery.dll.lib 2>&1"
+          $code = $LASTEXITCODE
+          Write-Host ($out -join "\n")
+          if ($code -ne 0) { Report-Failure 'cl contract.c' ($out -join "\n") $code }
 
-      # Debuggability: GitHub serves raw job logs from
-      # results-receiver.actions.githubusercontent.com, which is unreachable
-      # from some development environments (and the job summary is not exposed
-      # through the REST API either). When this job fails on a pull request,
-      # post the log as a PR comment so the failure is diagnosable from
-      # api.github.com alone.
-      - name: Report build diagnostics on failure
-        if: ${{ failure() && github.event_name == 'pull_request' }}
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          log=ci-build.log
-          : > "$log"
-          for id in $(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs" \
-                        --paginate --jq '.jobs[] | select(.conclusion=="failure") | .id'); do
-            {
-              echo "## Job $id"
-              echo '```'
-              gh api --only-show-errors "repos/${GITHUB_REPOSITORY}/actions/jobs/$id/logs" 2>&1 ||
-                echo '(log download failed)'
-              echo '```'
-            } >> "$log"
-          done
-          if [ ! -s "$log" ]; then
-            echo "no failing-job logs could be retrieved" > "$log"
-          fi
-          # Keep the comment bounded; the tail is where the failure is.
-          tail -c 60000 "$log" > body.md
-          {
-            echo "CI failed on ${GITHUB_SHA}."
-            echo
-            cat body.md
-          } > comment.md
-          gh pr comment "${{ github.event.pull_request.number }}" \
-            --repo "$GITHUB_REPOSITORY" --body-file comment.md
+          $out = cmd /c "call `"$vcvars`" >nul 2>&1 && cl /nologo /W4 /I include examples/c/example.c /Fe:target/release/example.exe /link target/release/winrecovery.dll.lib 2>&1"
+          $code = $LASTEXITCODE
+          Write-Host ($out -join "\n")
+          if ($code -ne 0) { Report-Failure 'cl example.c' ($out -join "\n") $code }
+
+          Write-Host 'MSVC build OK'
 
       # contract.exe is the assertion: every read-only entry point must obey
       # the documented contract (non-NULL valid JSON, or NULL plus a WR_ERR_*

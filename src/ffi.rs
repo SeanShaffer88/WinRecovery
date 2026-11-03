@@ -89,13 +89,16 @@ where
     }
 }
 
-fn opt_c_str<'a>(p: *const c_char) -> Option<&'a str> {
+fn opt_c_str<'a>(p: *const c_char) -> platform::PResult<Option<&'a str>> {
     if p.is_null() {
-        None
+        Ok(None)
     } else {
         // SAFETY: caller contract (header) — pointer is a valid
         // NUL-terminated UTF-8 string or null.
-        unsafe { CStr::from_ptr(p) }.to_str().ok()
+        unsafe { CStr::from_ptr(p) }
+            .to_str()
+            .map(Some)
+            .map_err(|_| (WR_ERR_INVALID_ARG, "argument is not valid UTF-8".into()))
     }
 }
 
@@ -225,14 +228,15 @@ pub extern "C" fn wr_restore_point_protection_json() -> *mut c_char {
 
 #[no_mangle]
 pub extern "C" fn wr_recycle_bin_info_json(drive: *const c_char) -> *mut c_char {
-    let d = opt_c_str(drive);
-    json_op(|| platform::recycle_bin_info(d), |info| info.to_json())
+    json_op(
+        || platform::recycle_bin_info(opt_c_str(drive)?),
+        |info| info.to_json(),
+    )
 }
 
 #[no_mangle]
 pub extern "C" fn wr_recycle_bin_empty(drive: *const c_char, no_confirmation: c_int) -> c_int {
-    let d = opt_c_str(drive).map(|s| s.to_string());
-    code_op(|| platform::recycle_bin_empty(d.as_deref(), no_confirmation != 0))
+    code_op(|| platform::recycle_bin_empty(opt_c_str(drive)?, no_confirmation != 0))
 }
 
 // ---------------------------------------------------------------------------
@@ -288,6 +292,27 @@ mod tests {
         let s = unsafe { CStr::from_ptr(p) }.to_str().unwrap().to_string();
         wr_free_string(p);
         s
+    }
+
+    #[test]
+    fn optional_drive_rejects_malformed_utf8_before_dispatch() {
+        let invalid = [0xffu8, 0];
+        let mut dispatched = false;
+        let result = code_op(|| {
+            let _drive = opt_c_str(invalid.as_ptr().cast())?;
+            dispatched = true;
+            Ok(())
+        });
+        assert_eq!(result, WR_ERR_INVALID_ARG);
+        assert!(!dispatched);
+        assert_eq!(
+            wr_recycle_bin_empty(invalid.as_ptr().cast(), 1),
+            WR_ERR_INVALID_ARG
+        );
+        assert!(wr_recycle_bin_info_json(invalid.as_ptr().cast()).is_null());
+        assert_eq!(wr_last_error_code(), WR_ERR_INVALID_ARG);
+        assert_eq!(opt_c_str(std::ptr::null()).unwrap(), None);
+        assert_eq!(opt_c_str(c"C:".as_ptr()).unwrap(), Some("C:"));
     }
 
     #[test]

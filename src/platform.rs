@@ -764,6 +764,81 @@ mod windows {
 
     // -- Services & drivers ------------------------------------------------------
 
+    struct Scm(Handle, fn(Handle));
+    impl Drop for Scm {
+        fn drop(&mut self) {
+            (self.1)(self.0);
+        }
+    }
+
+    fn enumerate_services(
+        mut call: impl FnMut(*mut u8, u32, &mut u32, &mut u32, &mut u32) -> Result<(), u32>,
+    ) -> PResult<Vec<ServiceEntry>> {
+        const MORE_DATA: u32 = 234;
+        const MAX_BUFFER: usize = 256 * 1024;
+        let mut storage: Vec<usize> = Vec::new();
+        let mut resume = 0;
+        let mut entries = Vec::new();
+        // Bound retries even if the service inventory changes continuously.
+        for _ in 0..128 {
+            let size = storage.len() * std::mem::size_of::<usize>();
+            let mut needed = 0;
+            let mut returned = 0;
+            let buffer = if size == 0 {
+                std::ptr::null_mut()
+            } else {
+                storage.as_mut_ptr().cast()
+            };
+            let result = call(buffer, size as u32, &mut needed, &mut returned, &mut resume);
+            if let Err(code) = result {
+                if code != MORE_DATA {
+                    return platform_err(format!("service enumeration failed (error {code})"));
+                }
+            }
+            let stride = std::mem::size_of::<EnumServiceStatusProcessW>();
+            if returned as usize > size / stride {
+                return platform_err("service enumeration returned an invalid record count");
+            }
+            let read = |p: *mut u16| -> PResult<String> {
+                let address = p as usize;
+                let start = buffer as usize;
+                let end = start + size;
+                if address < start || address >= end || address % std::mem::align_of::<u16>() != 0 {
+                    return platform_err("service enumeration returned an invalid name pointer");
+                }
+                // SAFETY: the pointer and length are bounded by initialized aligned storage.
+                let text = unsafe { std::slice::from_raw_parts(p, (end - address) / 2) };
+                let Some(len) = text.iter().position(|&c| c == 0) else {
+                    return platform_err("service enumeration returned an unterminated name");
+                };
+                Ok(from_wide(&text[..len]))
+            };
+            for i in 0..returned as usize {
+                // SAFETY: usize storage provides record alignment and count was checked above.
+                let rec = unsafe { &*buffer.add(i * stride).cast::<EnumServiceStatusProcessW>() };
+                entries.push(ServiceEntry {
+                    name: read(rec.service_name)?,
+                    display_name: read(rec.display_name)?,
+                    state: ServiceEntry::state_label(rec.status.current_state),
+                    process_id: rec.status.process_id,
+                    is_driver: rec.status.service_type & SERVICE_DRIVER != 0,
+                });
+            }
+            if result.is_ok() {
+                return Ok(entries);
+            }
+            if needed == 0 && returned == 0 {
+                return platform_err("service enumeration made no progress");
+            }
+            let requested = (needed as usize).max(size).min(MAX_BUFFER);
+            if requested == 0 {
+                return platform_err("service enumeration returned no buffer size");
+            }
+            storage.resize(requested.div_ceil(std::mem::size_of::<usize>()), 0);
+        }
+        platform_err("service enumeration exceeded retry limit")
+    }
+
     pub fn list_services(drivers_only: bool) -> PResult<Vec<ServiceEntry>> {
         // Invariant: null machine/database names select the local SCM (documented).
         let scm = unsafe {
@@ -785,92 +860,174 @@ mod windows {
         } else {
             SERVICE_WIN32 | SERVICE_DRIVER
         };
-        let mut needed: u32 = 0;
-        let mut returned: u32 = 0;
-        let mut resume: u32 = 0;
-        // Sizing call: null buffer with size 0 is the documented pattern;
-        // it fails with ERROR_MORE_DATA and reports `needed`.
-        unsafe {
-            EnumServicesStatusExW(
-                scm,
-                0,
-                svc_type,
-                SERVICE_STATE_ALL,
-                std::ptr::null_mut(),
-                0,
-                &mut needed,
-                &mut returned,
-                &mut resume,
-                std::ptr::null(),
-            );
-        }
-        if needed == 0 {
+        let _scm = Scm(scm, |handle| {
+            // SAFETY: the guard owns the successfully opened SCM handle.
             unsafe {
-                CloseServiceHandle(scm);
+                CloseServiceHandle(handle);
             }
-            return Ok(Vec::new());
-        }
-        let mut buf = vec![0u8; needed as usize];
-        let mut needed2: u32 = 0;
-        let mut returned2: u32 = 0;
-        let mut resume2: u32 = 0;
-        // Invariant: buf holds `needed` writable bytes as reported above.
-        let ok = unsafe {
-            EnumServicesStatusExW(
-                scm,
-                0,
-                svc_type,
-                SERVICE_STATE_ALL,
-                buf.as_mut_ptr(),
-                needed,
-                &mut needed2,
-                &mut returned2,
-                &mut resume2,
-                std::ptr::null(),
-            )
-        };
-        let entries = if ok != 0 {
-            // Invariant: on success the buffer holds `returned2` consecutive
-            // ENUM_SERVICE_STATUS_PROCESSW records whose name pointers point
-            // into the same buffer (documented SCM behavior).
-            let count = returned2 as usize;
-            let stride = std::mem::size_of::<EnumServiceStatusProcessW>();
-            let mut v = Vec::with_capacity(count);
-            for i in 0..count {
-                let rec =
-                    unsafe { &*(buf.as_ptr().add(i * stride) as *const EnumServiceStatusProcessW) };
-                let read = |p: *mut u16| -> String {
-                    if p.is_null() {
-                        return String::new();
-                    }
-                    let mut len = 0usize;
-                    unsafe {
-                        while *p.add(len) != 0 {
-                            len += 1;
-                        }
-                        from_wide(std::slice::from_raw_parts(p, len))
-                    }
-                };
-                v.push(ServiceEntry {
-                    name: read(rec.service_name),
-                    display_name: read(rec.display_name),
-                    state: ServiceEntry::state_label(rec.status.current_state),
-                    process_id: rec.status.process_id,
-                    is_driver: rec.status.service_type & SERVICE_DRIVER != 0,
-                });
+        });
+        let entries = enumerate_services(|buffer, size, needed, returned, resume| {
+            // SAFETY: the enumeration helper supplies aligned writable storage.
+            let ok = unsafe {
+                EnumServicesStatusExW(
+                    scm,
+                    0,
+                    svc_type,
+                    SERVICE_STATE_ALL,
+                    buffer,
+                    size,
+                    needed,
+                    returned,
+                    resume,
+                    std::ptr::null(),
+                )
+            };
+            if ok != 0 {
+                Ok(())
+            } else {
+                // SAFETY: captured immediately after the failed call.
+                Err(unsafe { GetLastError() })
             }
-            v
-        } else {
-            Vec::new()
-        };
-        unsafe {
-            CloseServiceHandle(scm);
-        }
+        })?;
         let mut entries: Vec<ServiceEntry> = entries
             .into_iter()
             .filter(|e| !drivers_only || e.is_driver)
             .collect();
         entries.sort_by_key(|a| a.name.to_lowercase());
         Ok(entries)
+    }
+    #[cfg(test)]
+    mod service_tests {
+        use super::*;
+
+        #[test]
+        fn scm_guard_closes_on_success_error_and_unwind() {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static CLOSED: AtomicUsize = AtomicUsize::new(0);
+            fn close(handle: Handle) {
+                assert_eq!(handle, 123);
+                CLOSED.fetch_add(1, Ordering::SeqCst);
+            }
+            for fail in [false, true] {
+                let operation = || -> PResult<Vec<ServiceEntry>> {
+                    let _handle = Scm(123, close);
+                    enumerate_services(|_, _, _, _, _| if fail { Err(5) } else { Ok(()) })
+                };
+                let _ = operation();
+            }
+            let _ = std::panic::catch_unwind(|| {
+                let _handle = Scm(123, close);
+                panic!("injected panic");
+            });
+            assert_eq!(CLOSED.load(Ordering::SeqCst), 3);
+        }
+
+        #[test]
+        fn empty_and_failures_are_distinct() {
+            assert!(enumerate_services(|_, _, _, _, _| Ok(()))
+                .unwrap()
+                .is_empty());
+            assert!(enumerate_services(|_, _, _, _, _| Err(5))
+                .unwrap_err()
+                .1
+                .contains("5"));
+            let mut calls = 0;
+            let error = enumerate_services(|_, _, needed, _, _| {
+                calls += 1;
+                *needed = 1024;
+                Err(if calls == 1 { 234 } else { 6 })
+            })
+            .unwrap_err();
+            assert_eq!(calls, 2);
+            assert!(error.1.contains("6"));
+        }
+
+        #[test]
+        fn invalid_and_unterminated_names_are_rejected() {
+            for malformed in 0..3 {
+                let mut calls = 0;
+                let result = enumerate_services(|buffer, size, needed, returned, _| {
+                    calls += 1;
+                    if calls == 1 {
+                        *needed = 1024;
+                        return Err(234);
+                    }
+                    // SAFETY: only the last UTF-16 word and the first record are written;
+                    // intentionally invalid pointers are stored, never dereferenced by the mock.
+                    unsafe {
+                        let name = match malformed {
+                            0 => buffer.add(size as usize).cast::<u16>(),
+                            1 => buffer.add(1).cast::<u16>(),
+                            _ => {
+                                let end = buffer.add(size as usize - 2).cast::<u16>();
+                                end.write(1);
+                                end
+                            }
+                        };
+                        buffer.cast::<EnumServiceStatusProcessW>().write(
+                            EnumServiceStatusProcessW {
+                                service_name: name,
+                                display_name: name,
+                                status: std::mem::zeroed(),
+                            },
+                        );
+                    }
+                    *returned = 1;
+                    Ok(())
+                });
+                assert!(result.is_err(), "malformed name case {malformed}");
+            }
+        }
+
+        #[test]
+        fn growth_pagination_and_record_bounds() {
+            let mut calls = 0;
+            let result = enumerate_services(|buffer, size, needed, returned, resume| {
+                calls += 1;
+                *needed = 1024 * calls;
+                if calls == 1 {
+                    return Err(234);
+                }
+                assert!(size >= 1024);
+                let stride = std::mem::size_of::<EnumServiceStatusProcessW>();
+                // SAFETY: the mock writes one record and two UTF-16 words inside supplied storage.
+                unsafe {
+                    let name = buffer.add(stride).cast::<u16>();
+                    name.write(b'a' as u16);
+                    name.add(1).write(0);
+                    buffer
+                        .cast::<EnumServiceStatusProcessW>()
+                        .write(EnumServiceStatusProcessW {
+                            service_name: name,
+                            display_name: name,
+                            status: std::mem::zeroed(),
+                        });
+                }
+                *returned = 1;
+                *resume += 1;
+                if calls == 2 {
+                    Err(234)
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap();
+            assert_eq!(calls, 3);
+            assert_eq!(result.len(), 2);
+            assert_eq!(result[0].name, "a");
+            assert!(enumerate_services(|_, _, _, returned, _| {
+                *returned = 1;
+                Ok(())
+            })
+            .is_err());
+            let mut calls = 0;
+            assert!(enumerate_services(|_, _, needed, _, _| {
+                calls += 1;
+                *needed = 1024;
+                Err(234)
+            })
+            .is_err());
+            assert_eq!(calls, 128);
+        }
     }
 }

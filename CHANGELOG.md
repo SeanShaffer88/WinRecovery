@@ -10,6 +10,8 @@ bump. Additive changes (new `wr_*` entry points) are minor bumps.
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-11-03
+
 ### Added
 
 - CI cross-target gate job on `ubuntu-latest`: the Windows-target clippy and
@@ -89,6 +91,10 @@ bump. Additive changes (new `wr_*` entry points) are minor bumps.
   DLL, no longer fails with "type already exists".
 
 ### Fixed
+
+- Reject malformed UTF-8 and invalid Recycle Bin drive roots before dispatch.
+- Report registry and service inventory failures instead of returning incomplete
+  or empty successful results; validate service enumeration buffers.
 
 - `smoke-test.ps1` decoded the library's UTF-8 strings with
   `Marshal.PtrToStringAnsi`, which uses the process ANSI code page and so

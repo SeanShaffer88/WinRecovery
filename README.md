@@ -72,7 +72,7 @@ wr.wr_free_string(ptr)
 print(f"{len(data)} programs installed")
 ```
 
-## API (v0.1.0)
+## API (v0.1.1)
 
 | Function | Returns |
 |---|---|

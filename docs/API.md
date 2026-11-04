@@ -1,4 +1,4 @@
-# WinRecovery API — v0.1.0
+# WinRecovery API — v0.1.1
 
 Authoritative declaration: [`../include/winrecovery.h`](../include/winrecovery.h).
 This document explains semantics, JSON shapes, and known limitations.

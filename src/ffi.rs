@@ -321,7 +321,16 @@ mod tests {
         // SAFETY: static NUL-terminated string.
         let s = unsafe { CStr::from_ptr(v) }.to_str().unwrap();
         assert_eq!(s, crate::VERSION);
-        assert_eq!(wr_version_major(), 0);
+        assert_eq!(s, env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            s,
+            format!(
+                "{}.{}.{}",
+                wr_version_major(),
+                wr_version_minor(),
+                wr_version_patch()
+            )
+        );
 
         // Guard the derivation in wr_version(): the byte exactly past the
         // string must be the NUL, and none before it may be. Without this, a

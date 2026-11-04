@@ -20,7 +20,7 @@
  *   administrator rights; Windows enforces this, and the resulting error
  *   is reported through wr_last_error().
  *
- * Version: 0.1.0 — see wr_version().
+ * Version: 0.1.1 — see wr_version().
  */
 
 #ifndef WINRECOVERY_H
